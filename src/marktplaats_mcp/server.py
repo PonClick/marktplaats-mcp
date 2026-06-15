@@ -387,8 +387,10 @@ def _format_listing_compact(listing: dict) -> dict:
     # Price: return euros as int when possible, otherwise short string
     price_type = price_info.get("priceType", "")
     price_cents = price_info.get("priceCents", 0)
-    if price_type in ("FIXED", "RESERVED") and price_cents > 0:
+    if price_type == "FIXED" and price_cents > 0:
         price = price_cents // 100
+    elif price_type == "RESERVED":
+        price = "res"
     elif price_type == "FREE" or price_cents == 0:
         price = 0
     elif price_type == "BID":
@@ -479,6 +481,7 @@ def search_listings(
         compact: Return minimal response format (~75% smaller). Omits description, image, links.
                  Use get_listing_details(id) for full info. Seller: B=business, P=private.
                  Condition: N=new, Z=as good as new, G=used, R=refurbished, D=defect.
+                 Price: integer (euros), or "res" (reserved), "bid", "notk", "ruil", "?".
 
     Returns:
         Dictionary with total_count, returned_count, and list of listings
@@ -615,7 +618,9 @@ def get_listing_details(listing_id: str) -> dict[str, Any]:
         listing_id: The listing ID (e.g., "m2340580395")
 
     Returns:
-        Full listing details including description, images, attributes, and seller info
+        Full listing details including description, images, attributes, and seller info.
+        Includes seller_id (int) when found, enabling get_seller_info() lookup.
+        Includes is_reserved (bool) and availability="Reserved" when listing is reserved.
     """
     if not listing_id:
         return {"error": "Please provide a listing_id"}
@@ -733,6 +738,34 @@ def get_listing_details(listing_id: str) -> dict[str, Any]:
         if location_match:
             result["location"] = location_match.group(1).strip()
 
+        # Extract seller ID and name from the ecGaPageViewCustomDimensions analytics blob.
+        # Parsing as JSON handles escaped characters (e.g. seller names with quotes or
+        # unicode escapes) reliably, unlike regex on the raw HTML string.
+        for script in soup.find_all("script"):
+            if script.string and "ecGaPageViewCustomDimensions" in script.string:
+                brace_idx = script.string.find("ecGaPageViewCustomDimensions")
+                brace_idx = script.string.find("{", brace_idx)
+                if brace_idx != -1:
+                    try:
+                        analytics, _ = json.JSONDecoder().raw_decode(script.string, brace_idx)
+                        seller_id_val = analytics.get("seller_id")
+                        if seller_id_val:
+                            result["seller_id"] = int(seller_id_val)
+                        seller_name_val = analytics.get("seller_name")
+                        if seller_name_val:
+                            result["seller_name"] = seller_name_val
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                break
+
+        # Check reservation status via the ListingHeader price element, which Marktplaats
+        # sets to the text "Gereserveerd" for reserved listings. Using the DOM element
+        # avoids false positives from the word appearing in the description body.
+        price_el = soup.find("div", class_="ListingHeader-price")
+        if price_el and price_el.get_text(strip=True) == "Gereserveerd":
+            result["is_reserved"] = True
+            result["availability"] = "Reserved"
+
         return result
 
     except requests.RequestException as e:
@@ -758,16 +791,19 @@ def get_seller_info(seller_id: int) -> dict[str, Any]:
         response.raise_for_status()
         data = response.json()
 
+        # Reviews are returned as a list; pick the internal review entry
+        reviews = data.get("reviews", [])
+        internal = next((r for r in reviews if r.get("reviewSystem") == "INTERNAL_REVIEWS"), None)
+
         return {
-            "id": data.get("sellerId"),
-            "name": data.get("sellerName"),
-            "is_verified": data.get("isVerified", False),
-            "average_score": data.get("averageScore"),
-            "number_of_reviews": data.get("numberOfReviews", 0),
+            "id": seller_id,
+            "is_verified": data.get("smbVerified", False),
+            "average_score": internal.get("rating") if internal else None,
+            "number_of_reviews": internal.get("numberOfReviews", 0) if internal else 0,
             "verification": {
-                "bank_account": data.get("bankAccountVerified", False),
-                "identification": data.get("identificationVerified", False),
-                "phone_number": data.get("phoneNumberVerified", False),
+                "bank_account": data.get("bankAccount", False),
+                "identification": data.get("identification", False),
+                "phone_number": data.get("phoneNumber", False),
             },
         }
 
