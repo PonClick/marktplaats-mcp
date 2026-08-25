@@ -17,7 +17,7 @@ Je kan op 2 manieren installeren: via `uvx` of handmatig.
 ### `uvx`
 
 ```
-claude mcp add --transport stdio marktplaats -- uvx git+https://github.com/PonClick/marktplaats-mcp marktplaats-mcp
+claude mcp add --transport stdio marktplaats -- uvx --with 'mcp<2' git+https://github.com/PonClick/marktplaats-mcp marktplaats-mcp
 ```
 
 of voeg toe in `.claude.json`:
